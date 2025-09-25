@@ -1,3 +1,4 @@
+# app/keyboards.py
 from aiogram import types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -8,7 +9,8 @@ def user_menu_kb() -> types.InlineKeyboardMarkup:
 
 def admin_menu_kb() -> types.InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="📊 Дэшборд", callback_data="admin_dashboard")           # <-- НОВОЕ
+    kb.button(text="📊 Дэшборд", callback_data="admin_dashboard")
+    kb.button(text="🔔 Уведомления", callback_data="admin_notifications")
     kb.button(text="🗂 Заявки на рассмотрение", callback_data="admin_pending_list")
     kb.button(text="➕ Добавить пользователя", callback_data="admin_add_user")
     kb.button(text="⏱ Установить дату окончания", callback_data="admin_set_end")
@@ -39,28 +41,16 @@ def approvals_keyboard_from_list(pending: list[tuple[int, str]]) -> types.Inline
     kb.adjust(2, 1)
     return kb.as_markup()
 
-# ---------- Клавиатура для дэшборда ----------
 def admin_dashboard_kb(filter_mode: str, page: int, has_prev: bool, has_next: bool) -> types.InlineKeyboardMarkup:
-    """
-    filter_mode: 'all' | 'with' | 'without'
-    page: номер страницы (0+)
-    """
-    caption = {
-        "all": "• Все",
-        "with": "• С датой" if filter_mode == "with" else "С датой",
-        "without": "• Без даты" if filter_mode == "without" else "Без даты",
-    }
     kb = InlineKeyboardBuilder()
-
-    # Пагинация
+    # пагинация
     if has_prev:
         kb.button(text="◀️", callback_data=f"admin_dash:{filter_mode}:{page-1}")
     if has_next:
         kb.button(text="▶️", callback_data=f"admin_dash:{filter_mode}:{page+1}")
     if has_prev or has_next:
         kb.adjust(2)
-
-    # Фильтры (выбранный помечаем точкой)
+    # фильтры
     kb.row(
         types.InlineKeyboardButton(text=("• Все" if filter_mode == "all" else "Все"),
                                    callback_data="admin_dash:all:0"),
@@ -69,8 +59,20 @@ def admin_dashboard_kb(filter_mode: str, page: int, has_prev: bool, has_next: bo
         types.InlineKeyboardButton(text=("• Без даты" if filter_mode == "without" else "Без даты"),
                                    callback_data="admin_dash:without:0"),
     )
-
-    # Назад
+    # назад
     kb.row(types.InlineKeyboardButton(text="⬅️ В меню", callback_data="admin_back"))
+    return kb.as_markup()
 
+def admin_notifications_kb(settings: dict) -> types.InlineKeyboardMarkup:
+    def mark(b: bool) -> str: return "✅ Вкл" if b else "❌ Выкл"
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"Все: {mark(settings['master'])}", callback_data="admin_notif_toggle:master")
+    kb.button(text=f"−3 дня 11:00: {mark(settings['tminus3'])}", callback_data="admin_notif_toggle:tminus3")
+    kb.button(text=f"В день 11:00: {mark(settings['onday'])}", callback_data="admin_notif_toggle:onday")
+    kb.button(text=f"После окончания: {mark(settings['after'])}", callback_data="admin_notif_toggle:after")
+    kb.adjust(1)
+    kb.button(text="Включить всё", callback_data="admin_notif_setall:on")
+    kb.button(text="Выключить всё", callback_data="admin_notif_setall:off")
+    kb.adjust(2)
+    kb.button(text="⬅️ В меню", callback_data="admin_back")
     return kb.as_markup()

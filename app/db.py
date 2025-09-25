@@ -6,7 +6,7 @@ from sqlalchemy import Column, Integer, String, Boolean, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-# === ВСЕГДА один и тот же файл БД в корне проекта ===
+# === Всегда один и тот же файл БД в корне проекта ===
 DB_PATH = Path(__file__).resolve().parent.parent / "bot.db"
 Base = declarative_base()
 
@@ -15,7 +15,7 @@ class User(Base):
     user_id = Column(Integer, primary_key=True)
     end_time = Column(String)             # "YYYY-MM-DD HH:MM:SS"
     active = Column(Boolean, default=False)
-    approved = Column(Boolean, default=False)   # ключевой флаг доступа
+    approved = Column(Boolean, default=False)
 
     tminus3_sent = Column(Boolean, default=False)
     onday_sent   = Column(Boolean, default=False)
@@ -26,7 +26,15 @@ class Pending(Base):
     user_id = Column(Integer, primary_key=True)
     created_at = Column(String)           # "YYYY-MM-DD HH:MM:SS"
 
-# ВАЖНО: создаём движок по абсолютному пути
+# ---- НОВОЕ: глобальные настройки уведомлений ----
+class Settings(Base):
+    __tablename__ = 'settings'
+    id = Column(Integer, primary_key=True, default=1)
+    notif_master  = Column(Boolean, default=True)
+    notif_tminus3 = Column(Boolean, default=True)
+    notif_onday   = Column(Boolean, default=True)
+    notif_after   = Column(Boolean, default=True)
+
 engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}", echo=False)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -43,10 +51,24 @@ async def _migrate_users_table():
         if "after_sent" not in cols:
             await conn.exec_driver_sql("ALTER TABLE users ADD COLUMN after_sent BOOLEAN DEFAULT 0")
 
+async def _ensure_settings_row():
+    async with async_session() as session:
+        row = await session.get(Settings, 1)
+        if not row:
+            session.add(Settings(
+                id=1,
+                notif_master=True,
+                notif_tminus3=True,
+                notif_onday=True,
+                notif_after=True,
+            ))
+            await session.commit()
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _migrate_users_table()
+    await _ensure_settings_row()
 
 # ---------- users ----------
 async def add_user(user_id: int):
@@ -140,12 +162,11 @@ async def mark_flag(user_id: int, field: str, value: bool = True):
             await session.commit()
 
 def _truthy(val) -> bool:
-    """Надёжно привести из SQLite к bool: 1/0, True/False, '1'/'0', 'true'/'false'."""
     if val is None:
         return False
     if isinstance(val, bool):
         return val
-    if isinstance(val, (int,)):
+    if isinstance(val, int):
         return val != 0
     if isinstance(val, (bytes, str)):
         s = (val.decode() if isinstance(val, bytes) else val).strip().lower()
@@ -162,10 +183,8 @@ async def is_user_approved(user_id: int) -> bool:
 async def add_pending(user_id: int) -> bool:
     async with async_session() as session:
         row = await session.get(User, user_id)
-        if row:
-            # если уже одобрен — заявки больше не создаём
-            if _truthy(row.approved):
-                return False
+        if row and _truthy(row.approved):
+            return False
         if await session.get(Pending, user_id):
             return False
         from datetime import datetime
@@ -186,17 +205,62 @@ async def get_pending_users() -> list[tuple[int, str]]:
         rows = result.fetchall()
         return [(r[0], r[1]) for r in rows]
 
-async def dispose_db():
-    await engine.dispose()
-
+# ---------- админ-дэшборд ----------
 async def get_all_users() -> list[tuple[int, Optional[str], bool, bool]]:
-    """
-    Возвращает список (user_id, end_time, approved, active) для всех пользователей.
-    """
     async with async_session() as session:
         result = await session.execute(
             select(User.user_id, User.end_time, User.approved, User.active)
         )
-        rows = result.fetchall()
-        # user_id, end_time, approved, active
-        return [tuple(r) for r in rows]  # type: ignore
+        return [tuple(r) for r in result.fetchall()]  # type: ignore
+
+# ---------- настройки уведомлений ----------
+async def get_settings() -> dict:
+    async with async_session() as session:
+        row = await session.get(Settings, 1)
+        if not row:
+            # на всякий случай
+            row = Settings(id=1)
+            session.add(row)
+            await session.commit()
+        return dict(
+            master=bool(row.notif_master),
+            tminus3=bool(row.notif_tminus3),
+            onday=bool(row.notif_onday),
+            after=bool(row.notif_after),
+        )
+
+async def toggle_setting(key: str) -> dict:
+    key_map = {
+        "master": "notif_master",
+        "tminus3": "notif_tminus3",
+        "onday": "notif_onday",
+        "after": "notif_after",
+    }
+    if key not in key_map:
+        return await get_settings()
+    attr = key_map[key]
+    async with async_session() as session:
+        row = await session.get(Settings, 1)
+        if not row:
+            row = Settings(id=1)
+            session.add(row)
+        current = bool(getattr(row, attr, False))
+        setattr(row, attr, not current)
+        await session.commit()
+    return await get_settings()
+
+async def set_all_notifications(value: bool) -> dict:
+    async with async_session() as session:
+        row = await session.get(Settings, 1)
+        if not row:
+            row = Settings(id=1)
+            session.add(row)
+        row.notif_master = value
+        row.notif_tminus3 = value
+        row.notif_onday = value
+        row.notif_after = value
+        await session.commit()
+    return await get_settings()
+
+async def dispose_db():
+    await engine.dispose()

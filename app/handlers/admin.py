@@ -1,35 +1,40 @@
 from aiogram import Router, F, types
-from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 
 from app.db import (
     get_pending_users, approve_user, remove_pending, get_active_users,
-    get_user_end_time, set_end_time, get_all_users
+    get_user_end_time, set_end_time, get_all_users,
+    get_settings, toggle_setting, set_all_notifications,
 )
 from app.keyboards import (
     admin_menu_kb, approvals_keyboard_from_list, back_to_admin_menu_kb,
-    admin_dashboard_kb
+    admin_dashboard_kb, admin_notifications_kb,
 )
 from app.states import AddUserSG, SetEndSG, CheckUserSG
 from config import Config
 
 router = Router()
 
-PAGE_SIZE = 20  # строк на страницу для дэшборда
+# ------------------------
+# Дэшборд: форматирование
+# ------------------------
+PAGE_SIZE = 20  # строк на страницу
 
-def _format_dashboard_page(users: list[tuple[int, str|None, bool, bool]],
-                           filter_mode: str, page: int) -> tuple[str, bool, bool, int, int]:
+def _format_dashboard_page(
+    users: list[tuple[int, str | None, bool, bool]],
+    filter_mode: str,
+    page: int,
+) -> tuple[str, bool, bool, int, int]:
     """
-    Возвращает (text, has_prev, has_next, page, total_pages)
     users: (user_id, end_time, approved, active)
+    return: (text, has_prev, has_next, page, total_pages)
     """
-    # Счётчики (до фильтра)
     total = len(users)
     with_date_cnt = sum(1 for _, et, *_ in users if et)
     without_date_cnt = total - with_date_cnt
 
-    # Фильтрация
+    # фильтр
     if filter_mode == "with":
         users_f = [u for u in users if u[1]]
     elif filter_mode == "without":
@@ -37,13 +42,14 @@ def _format_dashboard_page(users: list[tuple[int, str|None, bool, bool]],
     else:
         users_f = list(users)
 
-    # Сортировка: сначала по наличию даты (без даты в конце), затем по дате
-    def _sort_key(u):
+    # сортировка: сначала с датой по возрастанию, потом без даты
+    def _key(u):
         uid, et, *_ = u
-        return (0 if et else 1, (et or "9999-99-99 99:99:99"))
-    users_f.sort(key=_sort_key)
+        return (0 if et else 1, et or "9999-99-99 99:99:99")
 
-    # Пагинация
+    users_f.sort(key=_key)
+
+    # пагинация
     total_pages = max(1, (len(users_f) + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     start = page * PAGE_SIZE
@@ -52,19 +58,21 @@ def _format_dashboard_page(users: list[tuple[int, str|None, bool, bool]],
     has_prev = page > 0
     has_next = page < (total_pages - 1)
 
-    # Форматирование
+    # шапка + таблица
     header = (
         "📊 <b>Дэшборд пользователей</b>\n"
         f"Всего: <b>{total}</b> | с датой: <b>{with_date_cnt}</b> | без даты: <b>{without_date_cnt}</b>\n"
-        f"Стр. {page+1}/{total_pages} | Фильтр: <i>{'все' if filter_mode=='all' else ('с датой' if filter_mode=='with' else 'без даты')}</i>\n"
+        f"Стр. {page+1}/{total_pages} | Фильтр: <i>"
+        f"{'все' if filter_mode=='all' else ('с датой' if filter_mode=='with' else 'без даты')}</i>\n"
     )
 
     if not page_slice:
         return header + "\n(нет записей для показа)", has_prev, has_next, page, total_pages
 
-    # Таблица моноширинным шрифтом
-    lines = ["<pre>UID        END_TIME            APPROVED ACTIVE",
-             "----------------------------------------------"]
+    lines = [
+        "<pre>UID        END_TIME            APPROVED ACTIVE",
+        "----------------------------------------------"
+    ]
     for uid, et, approved, active in page_slice:
         et_disp = et if et else "—"
         appr = "✅" if approved else "❌"
@@ -75,7 +83,10 @@ def _format_dashboard_page(users: list[tuple[int, str|None, bool, bool]],
     text = header + "\n".join(lines)
     return text, has_prev, has_next, page, total_pages
 
-# ===== Назад =====
+
+# ---------------
+# Общие кнопки
+# ---------------
 @router.callback_query(F.data == "admin_back")
 async def admin_back(cb: types.CallbackQuery, state: FSMContext):
     if cb.from_user.id != Config.ADMIN_ID:
@@ -89,26 +100,27 @@ async def admin_back(cb: types.CallbackQuery, state: FSMContext):
             raise
     await cb.answer()
 
-# ===== Дэшборд: вход =====
+
+# ---------------
+# Дэшборд
+# ---------------
 @router.callback_query(F.data == "admin_dashboard")
 async def admin_dashboard(cb: types.CallbackQuery):
     if cb.from_user.id != Config.ADMIN_ID:
         await cb.answer("Недостаточно прав.", show_alert=True)
         return
     users = await get_all_users()
-    text, has_prev, has_next, page, _ = _format_dashboard_page(users, filter_mode="all", page=0)
+    text, has_prev, has_next, page, _ = _format_dashboard_page(users, "all", 0)
     kb = admin_dashboard_kb("all", page, has_prev, has_next)
     try:
         await cb.message.edit_text(text, reply_markup=kb)
     except TelegramBadRequest:
-        # если «message is not modified» — просто обновим клавиатуру
         try:
             await cb.message.edit_reply_markup(reply_markup=kb)
         except TelegramBadRequest:
             pass
     await cb.answer()
 
-# ===== Дэшборд: пагинация/фильтры =====
 @router.callback_query(F.data.startswith("admin_dash:"))
 async def admin_dashboard_page(cb: types.CallbackQuery):
     if cb.from_user.id != Config.ADMIN_ID:
@@ -129,7 +141,6 @@ async def admin_dashboard_page(cb: types.CallbackQuery):
         await cb.message.edit_text(text, reply_markup=kb)
     except TelegramBadRequest as e:
         if "message is not modified" in str(e).lower():
-            # попробуем хотя бы клавиатуру
             try:
                 await cb.message.edit_reply_markup(reply_markup=kb)
             except TelegramBadRequest:
@@ -138,22 +149,89 @@ async def admin_dashboard_page(cb: types.CallbackQuery):
             raise
     await cb.answer()
 
-# ===== Оставшиеся обработчики (заявки, approve/reject, FSM и пр.) ниже без изменений =====
-# ... (оставь остальной файл таким, как у тебя сейчас после последних правок)
 
-@router.callback_query(F.data == "admin_back")
-async def admin_back(cb: types.CallbackQuery, state: FSMContext):
+# ---------------
+# Уведомления
+# ---------------
+@router.callback_query(F.data == "admin_notifications")
+async def admin_notifications(cb: types.CallbackQuery):
     if cb.from_user.id != Config.ADMIN_ID:
         await cb.answer("Недостаточно прав.", show_alert=True)
         return
-    await state.clear()
+    s = await get_settings()
+    text = (
+        "🔔 <b>Уведомления</b>\n"
+        f"Все: {'<b>Вкл</b>' if s['master'] else '<b>Выкл</b>'}\n"
+        f"−3 дня в 11:00: {'Вкл' if s['tminus3'] else 'Выкл'}\n"
+        f"В день в 11:00: {'Вкл' if s['onday'] else 'Выкл'}\n"
+        f"После окончания (1ч): {'Вкл' if s['after'] else 'Выкл'}\n"
+        "\nНажмите на пункт, чтобы переключить."
+    )
+    kb = admin_notifications_kb(s)
     try:
-        await cb.message.edit_text("Меню администратора:", reply_markup=admin_menu_kb())
-    except TelegramBadRequest as e:
-        if "message is not modified" not in str(e).lower():
-            raise
+        await cb.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     await cb.answer()
 
+@router.callback_query(F.data.startswith("admin_notif_toggle:"))
+async def admin_notifications_toggle(cb: types.CallbackQuery):
+    if cb.from_user.id != Config.ADMIN_ID:
+        await cb.answer("Недостаточно прав.", show_alert=True)
+        return
+    key = cb.data.split(":", 1)[1]
+    s = await toggle_setting(key)
+    text = (
+        "🔔 <b>Уведомления</b>\n"
+        f"Все: {'<b>Вкл</b>' if s['master'] else '<b>Выкл</b>'}\n"
+        f"−3 дня в 11:00: {'Вкл' if s['tminus3'] else 'Выкл'}\n"
+        f"В день в 11:00: {'Вкл' if s['onday'] else 'Выкл'}\n"
+        f"После окончания (1ч): {'Вкл' if s['after'] else 'Выкл'}\n"
+    )
+    kb = admin_notifications_kb(s)
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            try:
+                await cb.message.edit_reply_markup(reply_markup=kb)
+            except TelegramBadRequest:
+                pass
+        else:
+            raise
+    await cb.answer("Обновлено")
+
+@router.callback_query(F.data.startswith("admin_notif_setall:"))
+async def admin_notifications_setall(cb: types.CallbackQuery):
+    if cb.from_user.id != Config.ADMIN_ID:
+        await cb.answer("Недостаточно прав.", show_alert=True)
+        return
+    val = cb.data.split(":", 1)[1]
+    s = await set_all_notifications(val == "on")
+    text = (
+        "🔔 <b>Уведомления</b>\n"
+        f"Все: {'<b>Вкл</b>' if s['master'] else '<b>Выкл</b>'}\n"
+        f"−3 дня в 11:00: {'Вкл' if s['tminus3'] else 'Выкл'}\n"
+        f"В день в 11:00: {'Вкл' if s['onday'] else 'Выкл'}\n"
+        f"После окончания (1ч): {'Вкл' if s['after'] else 'Выкл'}\n"
+    )
+    kb = admin_notifications_kb(s)
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+    await cb.answer("Готово")
+
+
+# ---------------
+# Заявки
+# ---------------
 @router.callback_query(F.data == "admin_pending_list")
 async def admin_pending_list(cb: types.CallbackQuery):
     if cb.from_user.id != Config.ADMIN_ID:
@@ -186,7 +264,6 @@ async def admin_approve(cb: types.CallbackQuery):
         await cb.answer("Ошибка данных.", show_alert=True)
         return
 
-    # ЯВНО одобряем
     await approve_user(uid)
     await remove_pending(uid)
 
@@ -246,14 +323,18 @@ async def admin_reject(cb: types.CallbackQuery):
         except TelegramBadRequest:
             pass
 
-# ===== Добавить пользователя (FSM) =====
+
+# ---------------
+# FSM: Добавить пользователя вручную
+# ---------------
 @router.callback_query(F.data == "admin_add_user")
 async def admin_add_user_btn(cb: types.CallbackQuery, state: FSMContext):
     if cb.from_user.id != Config.ADMIN_ID:
         await cb.answer("Недостаточно прав.", show_alert=True)
         return
     await state.set_state(AddUserSG.user_id)
-    await cb.message.edit_text("Введите user_id пользователя (число).", reply_markup=back_to_admin_menu_kb())
+    await cb.message.edit_text("Введите user_id пользователя (число).",
+                               reply_markup=back_to_admin_menu_kb())
     await cb.answer()
 
 @router.message(AddUserSG.user_id, F.text)
@@ -262,14 +343,19 @@ async def admin_add_user_id(message: types.Message, state: FSMContext):
         return
     try:
         uid = int(message.text.strip())
-        await approve_user(uid)     # <- сразу одобряем
+        await approve_user(uid)
         await remove_pending(uid)
         await message.answer(f"✅ Пользователь {uid} добавлен/одобрен.", reply_markup=admin_menu_kb())
         await state.clear()
     except ValueError:
-        await message.answer("❗ Введите корректный целочисленный user_id.", reply_markup=back_to_admin_menu_kb())
+        await message.send_copy(message.chat.id)  # избегаем скрытия клавы при ошибке
+        await message.answer("❗ Введите корректный целочисленный user_id.",
+                             reply_markup=back_to_admin_menu_kb())
 
-# ===== Установить дату окончания (FSM) =====
+
+# ---------------
+# FSM: Установить дату окончания
+# ---------------
 @router.callback_query(F.data == "admin_set_end")
 async def admin_set_end(cb: types.CallbackQuery, state: FSMContext):
     if cb.from_user.id != Config.ADMIN_ID:
@@ -291,7 +377,8 @@ async def admin_set_end_user(message: types.Message, state: FSMContext):
         await message.answer("Введите дату и время в формате: YYYY-MM-DD HH:MM:SS",
                              reply_markup=back_to_admin_menu_kb())
     except ValueError:
-        await message.answer("❗ Введите корректный целочисленный user_id.", reply_markup=back_to_admin_menu_kb())
+        await message.answer("❗ Введите корректный целочисленный user_id.",
+                             reply_markup=back_to_admin_menu_kb())
 
 @router.message(SetEndSG.dt_str, F.text)
 async def admin_set_end_dt(message: types.Message, state: FSMContext):
@@ -304,12 +391,17 @@ async def admin_set_end_dt(message: types.Message, state: FSMContext):
         data = await state.get_data()
         uid = data["user_id"]
         await set_end_time(uid, dt.strftime("%Y-%m-%d %H:%M:%S"))
-        await message.answer(f"✅ Время окончания для {uid} установлено: {dt}", reply_markup=admin_menu_kb())
+        await message.answer(f"✅ Время окончания для {uid} установлено: {dt}",
+                             reply_markup=admin_menu_kb())
         await state.clear()
     except ValueError:
         await message.answer("❗ Неверный формат. Используйте: YYYY-MM-DD HH:MM:SS",
                              reply_markup=back_to_admin_menu_kb())
 
+
+# ---------------
+# Прочее
+# ---------------
 @router.callback_query(F.data == "admin_list_active")
 async def admin_list_active(cb: types.CallbackQuery):
     if cb.from_user.id != Config.ADMIN_ID:
@@ -333,7 +425,8 @@ async def admin_check_user(cb: types.CallbackQuery, state: FSMContext):
         await cb.answer("Недостаточно прав.", show_alert=True)
         return
     await state.set_state(CheckUserSG.user_id)
-    await cb.message.edit_text("Введите user_id для проверки доступа.", reply_markup=back_to_admin_menu_kb())
+    await cb.message.edit_text("Введите user_id для проверки доступа.",
+                               reply_markup=back_to_admin_menu_kb())
     await cb.answer()
 
 @router.message(CheckUserSG.user_id, F.text)
@@ -347,4 +440,5 @@ async def admin_check_user_id(message: types.Message, state: FSMContext):
         await message.answer(text, reply_markup=admin_menu_kb())
         await state.clear()
     except ValueError:
-        await message.answer("❗ Введите корректный целочисленный user_id.", reply_markup=back_to_admin_menu_kb())
+        await message.answer("❗ Введите корректный целочисленный user_id.",
+                             reply_markup=back_to_admin_menu_kb())
