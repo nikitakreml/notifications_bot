@@ -1,4 +1,3 @@
-# app/keyboards.py
 from aiogram import types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -43,14 +42,12 @@ def approvals_keyboard_from_list(pending: list[tuple[int, str]]) -> types.Inline
 
 def admin_dashboard_kb(filter_mode: str, page: int, has_prev: bool, has_next: bool) -> types.InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    # пагинация
     if has_prev:
         kb.button(text="◀️", callback_data=f"admin_dash:{filter_mode}:{page-1}")
     if has_next:
         kb.button(text="▶️", callback_data=f"admin_dash:{filter_mode}:{page+1}")
     if has_prev or has_next:
         kb.adjust(2)
-    # фильтры
     kb.row(
         types.InlineKeyboardButton(text=("• Все" if filter_mode == "all" else "Все"),
                                    callback_data="admin_dash:all:0"),
@@ -59,7 +56,6 @@ def admin_dashboard_kb(filter_mode: str, page: int, has_prev: bool, has_next: bo
         types.InlineKeyboardButton(text=("• Без даты" if filter_mode == "without" else "Без даты"),
                                    callback_data="admin_dash:without:0"),
     )
-    # назад
     kb.row(types.InlineKeyboardButton(text="⬅️ В меню", callback_data="admin_back"))
     return kb.as_markup()
 
@@ -75,4 +71,35 @@ def admin_notifications_kb(settings: dict) -> types.InlineKeyboardMarkup:
     kb.button(text="Выключить всё", callback_data="admin_notif_setall:off")
     kb.adjust(2)
     kb.button(text="⬅️ В меню", callback_data="admin_back")
+    return kb.as_markup()
+
+# ---------- выбор пользователя для установки даты (показываем имя) ----------
+def admin_set_picker_kb(items: list[tuple[int, str|None, str|None]], page: int, total_pages: int) -> types.InlineKeyboardMarkup:
+    """
+    items: (user_id, name, end_time) для текущей страницы
+    """
+    kb = InlineKeyboardBuilder()
+    for uid, name, et in items:
+        title = (name or "—")
+        label = f"{title} ({uid}) — {et if et else '—'}"
+        kb.button(text=label, callback_data=f"admin_set_pick:{uid}:{page}")
+    kb.adjust(1)
+
+    has_prev = page > 0
+    has_next = page < (total_pages - 1)
+    if has_prev:
+        kb.button(text="◀️", callback_data=f"admin_set_list:{page-1}")
+    if has_next:
+        kb.button(text="▶️", callback_data=f"admin_set_list:{page+1}")
+    if has_prev or has_next:
+        kb.adjust(2)
+
+    kb.button(text="⬅️ В меню", callback_data="admin_back")
+    return kb.as_markup()
+
+def back_to_set_list_kb(page: int) -> types.InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ К списку", callback_data=f"admin_set_list:{page}")
+    kb.button(text="⬅️ В меню", callback_data="admin_back")
+    kb.adjust(2)
     return kb.as_markup()
