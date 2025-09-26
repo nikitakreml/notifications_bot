@@ -21,7 +21,7 @@ services:
 
     # запись разрешена только в БД и tmp
     volumes:
-      - ./data/bot.db:/app/bot.db
+      - ./data:/data
       - type: tmpfs
         target: /tmp
       - type: tmpfs
