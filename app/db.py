@@ -5,8 +5,9 @@ from pathlib import Path
 from sqlalchemy import Column, Integer, String, Boolean, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+import os
 
-DB_PATH = Path(__file__).resolve().parent.parent / "bot.db"
+DB_PATH = Path(os.getenv("DB_PATH", "/data/bot.db"))
 Base = declarative_base()
 
 class User(Base):
