@@ -1,0 +1,44 @@
+services:
+  bot:
+    build:
+      context: .
+    image: networktrackbot:latest
+    restart: always
+
+    env_file:
+      - .env
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_ID=${ADMIN_ID}
+      - TZ=${TZ}
+
+    # безопасность
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # запись разрешена только в БД и tmp
+    volumes:
+      - ./data/bot.db:/app/bot.db
+      - type: tmpfs
+        target: /tmp
+      - type: tmpfs
+        target: /var/tmp
+
+    # запускаем под вашим UID/GID, чтобы были права на ./data/bot.db
+    user: "${UID}:${GID}"
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+
+    healthcheck:
+      test: ["CMD-SHELL", "python - << 'PY'\nimport os,sys,urllib.request,json\nu=f\"https://api.telegram.org/bot{os.getenv('BOT_TOKEN')}/getMe\"\ntry:\n  json.load(urllib.request.urlopen(u,timeout=10))\n  sys.exit(0)\nexcept Exception:\n  sys.exit(1)\nPY"]
+      interval: 1m
+      timeout: 15s
+      retries: 3
+      start_period: 20s

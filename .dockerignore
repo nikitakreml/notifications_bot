@@ -1,0 +1,17 @@
+# .dockerignore (в корне)
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite
+*.db
+*.env
+data/
+.venv/
+.idea/
+.vscode/
+dist/
+build/
