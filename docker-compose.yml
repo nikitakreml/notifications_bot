@@ -5,25 +5,26 @@ services:
     image: notifications_bot:latest
     container_name: notifications_bot-bot-1
     restart: always
+    init: true                     # аккуратные сигналы/зомби-реапер
 
-    # Переменные окружения берём из .env
     env_file:
       - .env
     environment:
-      # На всякий случай прокидываем ключевые переменные
       - BOT_TOKEN=${BOT_TOKEN}
       - ADMIN_ID=${ADMIN_ID}
       - TZ=${TZ}
       - DB_PATH=/data/bot.db
+      - PYTHONDONTWRITEBYTECODE=1  # не писать .pyc на read-only FS
+      - PYTHONUNBUFFERED=1         # логи без буферизации
+      - HOME=/tmp                  # $HOME доступен для произвольного UID
+    command: ["python", "-X", "utf8", "main.py"]
 
-    # Безопасность: корневая ФС только для чтения
     read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
 
-    # Куда можно писать
     volumes:
       - ./data:/data
       - type: tmpfs
@@ -31,14 +32,11 @@ services:
       - type: tmpfs
         target: /var/tmp
 
-    # Запускать контейнер от вашего пользователя (UID/GID заданы в .env)
     user: "${UID}:${GID}"
 
-    # Мягкое завершение, чтобы не ловить exit 137
     stop_signal: SIGINT
     stop_grace_period: 60s
 
-    # Ограничения и лог-ротация (под VPS с малой RAM)
     mem_limit: 256m
     memswap_limit: 1g
     logging:
@@ -47,7 +45,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # Healthcheck: проверяем доступность Telegram API и что вебхук отключён
     healthcheck:
       test:
         [
