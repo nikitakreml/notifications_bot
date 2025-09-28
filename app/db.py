@@ -1,11 +1,16 @@
 from __future__ import annotations
 from typing import Optional
 from pathlib import Path
-
+import logging
 from sqlalchemy import Column, Integer, String, Boolean, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import event
+import asyncio
 import os
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = Path(os.getenv("DB_PATH", "/data/bot.db"))
 Base = declarative_base()
@@ -36,8 +41,41 @@ class Settings(Base):
     notif_onday   = Column(Boolean, default=True)
     notif_after   = Column(Boolean, default=True)
 
-engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}", echo=False)
+engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}?timeout=30", echo=False, pool_pre_ping=True)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+@event.listens_for(engine.sync_engine, "connect")
+def _sqlite_pragmas(dbapi_conn, conn_record):
+    cur = dbapi_conn.cursor()
+    # ускоряем и уменьшаем конфликты чтение/запись
+    cur.execute("PRAGMA journal_mode=WAL;")
+    cur.execute("PRAGMA synchronous=NORMAL;")
+    cur.execute("PRAGMA foreign_keys=ON;")
+    # сколько ждать при конфликте блокировки (мс)
+    cur.execute("PRAGMA busy_timeout=30000;")
+    cur.close()
+
+
+async def _safe_commit(session, retries: int = 5, base_delay: float = 0.2):
+    """
+    Коммит с экспоненциальной задержкой при sqlite 'database is locked'.
+    Даём шанс конкурентной транзакции закончить запись.
+    """
+    delay = base_delay
+    for attempt in range(1, retries + 1):
+        try:
+            await _safe_commit(session)
+            return
+        except OperationalError as e:
+            if "database is locked" in str(e).lower():
+                logger.warning(f"Commit locked (attempt {attempt}/{retries}), retry in {delay:.2f}s")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 2.0)  # максимум 2 секунды между повторами
+                continue
+            raise
+    # Последний шанс: пусть бросит исключение, если не получилось
+    await _safe_commit(session)
+
 
 async def _migrate_users_table():
     async with engine.begin() as conn:
@@ -59,7 +97,7 @@ async def _ensure_settings_row():
         row = await session.get(Settings, 1)
         if not row:
             session.add(Settings(id=1, notif_master=True, notif_tminus3=True, notif_onday=True, notif_after=True))
-            await session.commit()
+            await _safe_commit(session)
 
 async def init_db():
     async with engine.begin() as conn:
@@ -90,7 +128,7 @@ async def add_user(user_id: int):
                 active=False, approved=False,
                 tminus3_sent=False, onday_sent=False, after_sent=False
             ))
-            await session.commit()
+            await _safe_commit(session)
 
 async def approve_user(user_id: int, name: str):
     """Одобрить пользователя и сохранить имя (создать при необходимости)."""
@@ -107,7 +145,7 @@ async def approve_user(user_id: int, name: str):
                 active=False, approved=True,
                 tminus3_sent=False, onday_sent=False, after_sent=False
             ))
-        await session.commit()
+        await _safe_commit(session)
 
 async def set_end_time(user_id: int, end_time: str):
     async with async_session() as session:
@@ -124,7 +162,7 @@ async def set_end_time(user_id: int, end_time: str):
                 active=True, approved=True,
                 tminus3_sent=False, onday_sent=False, after_sent=False
             ))
-        await session.commit()
+        await _safe_commit(session)
 
 async def get_user_end_time(user_id: int) -> Optional[str]:
     async with async_session() as session:
@@ -154,7 +192,7 @@ async def update_active_status(user_id: int, active: bool):
         row = await session.get(User, user_id)
         if row:
             row.active = active
-            await session.commit()
+            await _safe_commit(session)
 
 async def mark_flag(user_id: int, field: str, value: bool = True):
     if field not in {"tminus3_sent", "onday_sent", "after_sent"}:
@@ -163,7 +201,7 @@ async def mark_flag(user_id: int, field: str, value: bool = True):
         row = await session.get(User, user_id)
         if row:
             setattr(row, field, value)
-            await session.commit()
+            await _safe_commit(session)
 
 # ---------- pending ----------
 async def add_pending(user_id: int) -> bool:
@@ -175,7 +213,7 @@ async def add_pending(user_id: int) -> bool:
             return False
         from datetime import datetime
         session.add(Pending(user_id=user_id, created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        await session.commit()
+        await _safe_commit(session)
         return True
 
 async def remove_pending(user_id: int):
@@ -183,7 +221,7 @@ async def remove_pending(user_id: int):
         row = await session.get(Pending, user_id)
         if row:
             await session.delete(row)
-            await session.commit()
+            await _safe_commit(session)
 
 async def get_pending_users() -> list[tuple[int, str]]:
     async with async_session() as session:
@@ -206,7 +244,7 @@ async def get_settings() -> dict:
         if not row:
             row = Settings(id=1)
             session.add(row)
-            await session.commit()
+            await _safe_commit(session)
         return dict(
             master=bool(row.notif_master),
             tminus3=bool(row.notif_tminus3),
@@ -226,7 +264,7 @@ async def toggle_setting(key: str) -> dict:
             session.add(row)
         current = bool(getattr(row, attr, False))
         setattr(row, attr, not current)
-        await session.commit()
+        await _safe_commit(session)
     return await get_settings()
 
 async def set_all_notifications(value: bool) -> dict:
@@ -239,7 +277,7 @@ async def set_all_notifications(value: bool) -> dict:
         row.notif_tminus3 = value
         row.notif_onday = value
         row.notif_after = value
-        await session.commit()
+        await _safe_commit(session)
     return await get_settings()
 
 async def dispose_db():
