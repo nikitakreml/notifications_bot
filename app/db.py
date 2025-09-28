@@ -4,9 +4,10 @@ from pathlib import Path
 import logging
 from sqlalchemy import Column, Integer, String, Boolean, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError,DBAPIError
 from sqlalchemy.orm import declarative_base, sessionmaker
 import asyncio
+import contextlib
 import os
 
 logger = logging.getLogger(__name__)
@@ -43,25 +44,40 @@ class Settings(Base):
 engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}?timeout=30", echo=False, pool_pre_ping=True, connect_args={"timeout": 30},)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-async def _safe_commit(session, retries: int = 5, base_delay: float = 0.2):
+async def _safe_commit(session, retries: int = 10) -> None:
     """
-    Коммит с экспоненциальной задержкой при sqlite 'database is locked'.
-    Даём шанс конкурентной транзакции закончить запись.
+    Надёжный коммит с ретраями для SQLite:
+    - на 'database is locked' делаем rollback и ждём с экспоненциальной задержкой
+    - без рекурсии, чтобы не упираться в RecursionError
     """
-    delay = base_delay
+    delay = 0.1
     for attempt in range(1, retries + 1):
         try:
-            await _safe_commit(session)
+            await session.commit()
             return
         except OperationalError as e:
-            if "database is locked" in str(e).lower():
-                logger.warning(f"Commit locked (attempt {attempt}/{retries}), retry in {delay:.2f}s")
+            msg = str(e).lower()
+            # типичные тексты ошибок блокировок у sqlite/aiosqlite
+            if "database is locked" in msg or "database is busy" in msg or "locked" in msg:
+                # откатываем текущую транзакцию, ждём и пробуем снова
+                with contextlib.suppress(Exception):
+                    await session.rollback()
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, 2.0)  # максимум 2 секунды между повторами
+                delay = min(delay * 2, 2.0)  # backoff до 2 сек
+                continue
+            # не наша ошибка — отдаём дальше
+            raise
+        except DBAPIError as e:
+            # если соединение инвалидировано — подождём и попробуем ещё раз
+            if getattr(e, "connection_invalidated", False) and attempt < retries:
+                with contextlib.suppress(Exception):
+                    await session.rollback()
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 2.0)
                 continue
             raise
-    # Последний шанс: пусть бросит исключение, если не получилось
-    await _safe_commit(session)
+    # если все попытки исчерпаны — бросаем явную ошибку
+    raise RuntimeError("Commit failed after retries due to database locks")
 
 
 async def _migrate_users_table():
