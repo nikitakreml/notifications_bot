@@ -6,7 +6,6 @@ from sqlalchemy import Column, Integer, String, Boolean, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy import event
 import asyncio
 import os
 
@@ -43,18 +42,6 @@ class Settings(Base):
 
 engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}?timeout=30", echo=False, pool_pre_ping=True)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-@event.listens_for(engine.sync_engine, "connect")
-def _sqlite_pragmas(dbapi_conn, conn_record):
-    cur = dbapi_conn.cursor()
-    # ускоряем и уменьшаем конфликты чтение/запись
-    cur.execute("PRAGMA journal_mode=WAL;")
-    cur.execute("PRAGMA synchronous=NORMAL;")
-    cur.execute("PRAGMA foreign_keys=ON;")
-    # сколько ждать при конфликте блокировки (мс)
-    cur.execute("PRAGMA busy_timeout=30000;")
-    cur.close()
-
 
 async def _safe_commit(session, retries: int = 5, base_delay: float = 0.2):
     """
@@ -100,8 +87,26 @@ async def _ensure_settings_row():
             await _safe_commit(session)
 
 async def init_db():
+    # 1) Применяем PRAGMA с повторами (если вдруг файл занят долей секунды)
+    for attempt in range(1, 6):  # до 5 попыток
+        try:
+            async with engine.begin() as conn:
+                await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+                await conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
+                await conn.exec_driver_sql("PRAGMA foreign_keys=ON;")
+                await conn.exec_driver_sql("PRAGMA busy_timeout=30000;")
+            break
+        except OperationalError as e:
+            if "database is locked" in str(e).lower() and attempt < 5:
+                await asyncio.sleep(0.3 * attempt)  # небольшая экспоненциальная задержка
+                continue
+            raise
+
+    # 2) Создаём таблицы (идемпотентно)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # 3) Миграции и базовые данные
     await _migrate_users_table()
     await _ensure_settings_row()
 
