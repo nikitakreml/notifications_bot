@@ -40,7 +40,7 @@ class Settings(Base):
     notif_onday   = Column(Boolean, default=True)
     notif_after   = Column(Boolean, default=True)
 
-engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}?timeout=30", echo=False, pool_pre_ping=True)
+engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}?timeout=30", echo=False, pool_pre_ping=True, connect_args={"timeout": 30},)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 async def _safe_commit(session, retries: int = 5, base_delay: float = 0.2):
@@ -87,26 +87,73 @@ async def _ensure_settings_row():
             await _safe_commit(session)
 
 async def init_db():
-    # 1) Применяем PRAGMA с повторами (если вдруг файл занят долей секунды)
-    for attempt in range(1, 6):  # до 5 попыток
+    """
+    1) Сначала пытаемся выставить безопасные PRAGMA:
+       - busy_timeout (чтобы эта коннекция ждала при локах)
+       - проверяем journal_mode; если не WAL — пробуем включить
+       - включаем synchronous=NORMAL и foreign_keys=ON
+       Все действия с ретраями (до ~60 сек суммарно).
+    2) Создаём таблицы (идемпотентно) — тоже с ретраями.
+    3) Локальные миграции и дефолтные настройки.
+    """
+    # --- Шаг 1: PRAGMA с ретраями ---
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             async with engine.begin() as conn:
-                await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+                # Важно: сначала увеличим busy_timeout для самой этой коннекции
+                await conn.exec_driver_sql("PRAGMA busy_timeout=30000;")
+
+                # Проверим текущий journal_mode, чтобы не дергать WAL зря
+                cur_mode = (await conn.exec_driver_sql("PRAGMA journal_mode;")).scalar()
+                cur_mode = (str(cur_mode) if cur_mode is not None else "").lower()
+
+                if cur_mode != "wal":
+                    # Попробуем включить WAL (может требовать эксклюзивный лок)
+                    try:
+                        new_mode = (await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")).scalar()
+                        logger.info(f"SQLite journal_mode set to: {new_mode}")
+                    except OperationalError as e:
+                        if "database is locked" in str(e).lower():
+                            # Это не критично — просто оставим текущий режим и пойдём дальше
+                            logger.warning("Unable to switch to WAL now (locked). Continue with current journal_mode.")
+                        else:
+                            raise
+
+                # Остальные безопасные PRAGMA
                 await conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
                 await conn.exec_driver_sql("PRAGMA foreign_keys=ON;")
-                await conn.exec_driver_sql("PRAGMA busy_timeout=30000;")
+
+            break  # PRAGMA этап прошёл
+        except OperationalError as e:
+            if "database is locked" in str(e).lower():
+                # Подождём и повторим (экспоненциальная задержка до 5 сек)
+                delay = min(0.5 * attempt, 5.0)
+                logger.warning(f"PRAGMA phase locked (attempt {attempt}), retrying in {delay:.1f}s...")
+                await asyncio.sleep(delay)
+                # Дадим шанс до 30 попыток (~минуту)
+                if attempt < 30:
+                    continue
+            raise
+
+    # --- Шаг 2: create_all с ретраями ---
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
             break
         except OperationalError as e:
-            if "database is locked" in str(e).lower() and attempt < 5:
-                await asyncio.sleep(0.3 * attempt)  # небольшая экспоненциальная задержка
+            if "database is locked" in str(e).lower() and attempt < 30:
+                delay = min(0.5 * attempt, 5.0)
+                logger.warning(f"create_all locked (attempt {attempt}), retrying in {delay:.1f}s...")
+                await asyncio.sleep(delay)
                 continue
             raise
 
-    # 2) Создаём таблицы (идемпотентно)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    # 3) Миграции и базовые данные
+    # --- Шаг 3: миграции и дефолтные значения ---
     await _migrate_users_table()
     await _ensure_settings_row()
 
