@@ -9,12 +9,6 @@ services:
     # Переменные окружения берём из .env
     env_file:
       - .env
-    environment:
-      # На всякий случай прокидываем ключевые переменные
-      - BOT_TOKEN=${BOT_TOKEN}
-      - ADMIN_ID=${ADMIN_ID}
-      - TZ=${TZ}
-      - DB_PATH=/data/bot.db
 
     # Безопасность: корневая ФС только для чтения
     read_only: true
@@ -23,16 +17,17 @@ services:
     cap_drop:
       - ALL
 
-    # Куда можно писать
+    # Запускать контейнер от вашего пользователя (UID/GID заданы в .env)
+    user: "${UID}:${GID}"
+
+    # --- ИЗМЕНЕНИЕ 1: ИСПОЛЬЗУЕМ ИМЕНОВАННЫЙ ТОМ ---
+    # Это изолирует БД и решает проблему блокировки.
     volumes:
-      - ./data:/data
+      - botdata:/data
       - type: tmpfs
         target: /tmp
       - type: tmpfs
         target: /var/tmp
-
-    # Запускать контейнер от вашего пользователя (UID/GID заданы в .env)
-    user: "${UID}:${GID}"
 
     # Мягкое завершение, чтобы не ловить exit 137
     stop_signal: SIGINT
@@ -47,14 +42,28 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # Healthcheck: проверяем доступность Telegram API и что вебхук отключён
+    # Healthcheck: проверяем доступность Telegram API
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python - << 'PY'\nimport os,sys,urllib.request,json\nbt=os.getenv('BOT_TOKEN')\ntry:\n  me=json.load(urllib.request.urlopen(f'https://api.telegram.org/bot{bt}/getMe',timeout=10))\n  info=json.load(urllib.request.urlopen(f'https://api.telegram.org/bot{bt}/getWebhookInfo',timeout=10))\n  url=info.get('result',{}).get('url','')\n  sys.exit(0 if me.get('ok') and not url else 1)\nexcept Exception:\n  sys.exit(1)\nPY"
-        ]
+      test: >
+        python -c "import asyncio, os; from aiogram import Bot;
+        async def check():
+          bot = Bot(token=os.environ['BOT_TOKEN']);
+          try:
+            await bot.delete_webhook();
+            me = await bot.get_me();
+            exit(0 if me else 1);
+          except Exception:
+            exit(1);
+          finally:
+            await bot.session.close();
+        asyncio.run(check())"
       interval: 1m
-      timeout: 15s
+      timeout: 20s
       retries: 3
-      start_period: 25s
+      start_period: 30s
+
+# --- ИЗМЕНЕНИЕ 1 (продолжение): ОБЪЯВЛЯЕМ ИМЕНОВАННЫЙ ТОМ ---
+# Docker сам будет управлять этой папкой.
+volumes:
+  botdata:
+    driver: local
