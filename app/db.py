@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(os.getenv("DB_PATH", "data/bot.db"))
+DB_PATH = Path(os.getenv("DB_PATH", "/data/bot.db"))
 Base = declarative_base()
 
 # --- ГЛОБАЛЬНЫЙ ЛОК ДЛЯ ЗАПИСИ В БД ---
