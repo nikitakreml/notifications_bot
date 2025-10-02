@@ -96,7 +96,7 @@ async def init_db():
     for attempt in range(30):
         try:
             async with engine.begin() as conn:
-                await conn.exec_driver_sql("PRAGMA busy_timeout=30000;")
+                await conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
                 res = await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
                 logger.info(f"SQLite journal_mode set to: {res.scalar()}")
                 await conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
